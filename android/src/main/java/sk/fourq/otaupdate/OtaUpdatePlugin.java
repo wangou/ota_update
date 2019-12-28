@@ -1,6 +1,5 @@
 package sk.fourq.otaupdate;
 
-import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
@@ -11,21 +10,20 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Message;
-import android.os.Environment;
 import android.util.Log;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Map;
+
+import androidx.core.content.FileProvider;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.PluginRegistry;
 import io.flutter.plugin.common.PluginRegistry.Registrar;
-
-import java.io.File;
-import java.util.Map;
-import java.util.Arrays;
-
-import androidx.core.content.FileProvider;
-import androidx.core.content.ContextCompat;
-import androidx.core.app.ActivityCompat;
 
 /**
  * OtaUpdatePlugin
@@ -85,19 +83,20 @@ public class OtaUpdatePlugin implements EventChannel.StreamHandler, PluginRegist
             androidProviderAuthority = context.getPackageName() + "." + "ota_update_provider";
         }
 
-        if (
-//                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(registrar.context(), Manifest.permission.ACCESS_WIFI_STATE) &&
-//                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(registrar.context(), Manifest.permission.ACCESS_NETWORK_STATE) &&
-                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(registrar.context(), Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
-            handleCall();
-        } else {
-            String[] permissions = {
-//                    Manifest.permission.ACCESS_WIFI_STATE,
-//                    Manifest.permission.ACCESS_NETWORK_STATE,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-            };
-            ActivityCompat.requestPermissions(registrar.activity(), permissions, 0);
-        }
+//        if (
+////                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(registrar.context(), Manifest.permission.ACCESS_WIFI_STATE) &&
+////                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(registrar.context(), Manifest.permission.ACCESS_NETWORK_STATE) &&
+//                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(registrar.context(), Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+//
+//        } else {
+//            String[] permissions = {
+////                    Manifest.permission.ACCESS_WIFI_STATE,
+////                    Manifest.permission.ACCESS_NETWORK_STATE,
+//                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+//            };
+//            ActivityCompat.requestPermissions(registrar.activity(), permissions, 0);
+//        }
+        handleCall();
     }
 
     @Override
@@ -129,57 +128,34 @@ public class OtaUpdatePlugin implements EventChannel.StreamHandler, PluginRegist
     private void handleCall() {
         try {
             //PREPARE URLS
-            final String destination = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + "/" + "ordo.apk";
-            final Uri fileUri = Uri.parse("file://" + destination);
+            Log.e(TAG, "handleCall");
+            final File destinationFile = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "ordo.apk");
 
             //DELETE APK FILE IF SOME ALREADY EXISTS
-            File file = new File(destination);
-            if (file.exists()) {
-                if (!file.delete()) {
+            if (destinationFile.exists()) {
+                if (!destinationFile.delete()) {
                     Log.e(TAG, "ERROR: unable to delete old apk file before starting OTA");
                 }
             }
 
-            //CREATE DOWNLOAD MANAGER REQUEST
-            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(downloadUrl));
-            request.setDestinationUri(fileUri);
-
-            //GET DOWNLOAD SERVICE AND ENQUEUE OUR DOWNLOAD REQUEST
-            final DownloadManager manager = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
-            final long downloadId = manager.enqueue(request);
+            final long downloadId = downloadSimple(downloadUrl, "ordo.apk", "正在下载中……");
 
             //START TRACKING DOWNLOAD PROGRESS IN SEPARATE THREAD
-            trackDownloadProgress(downloadId, manager);
 
             //REGISTER LISTENER TO KNOW WHEN DOWNLOAD IS COMPLETE
             context.registerReceiver(new BroadcastReceiver() {
                 public void onReceive(Context c, Intent i) {
+                    Log.e("downloadComplete", i.toString() + i.getExtras().toString());
+                    for (String key : i.getExtras().keySet()) {
+                        Log.e(key, i.getExtras().get(key).toString());
+                    }
                     //DOWNLOAD IS COMPLETE, UNREGISTER RECEIVER AND CLOSE PROGRESS SINK
                     context.unregisterReceiver(this);
-                    //TRIGGER APK INSTALLATION
-                    Intent intent;
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        //AUTHORITY NEEDS TO BE THE SAME ALSO IN MANIFEST
-                        Uri apkUri = FileProvider.getUriForFile(context, androidProviderAuthority, new File(destination));
-                        intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
-                        intent.setData(apkUri);
-                        intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    } else {
-                        intent = new Intent(Intent.ACTION_VIEW);
-                        intent.setDataAndType(fileUri, "application/vnd.android.package-archive");
-                        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    }
-                    //SEND INSTALLING EVENT
-                    if(progressSink != null){
-                        progressSink.success(Arrays.asList("" + OtaStatus.INSTALLING.ordinal(), ""));
-                        progressSink.endOfStream();
-                        progressSink = null;
-                        context.startActivity(intent);
-                    }
+                    installAPK(destinationFile);
                 }
             }, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
         } catch (Exception e) {
-            if(progressSink != null){
+            if (progressSink != null) {
                 progressSink.error("" + OtaStatus.INTERNAL_ERROR.ordinal(), e.getMessage(), null);
                 progressSink = null;
             }
@@ -224,4 +200,61 @@ public class OtaUpdatePlugin implements EventChannel.StreamHandler, PluginRegist
             }
         }).start();
     }
+
+    //简单的下载功能
+    public long downloadSimple(String url, String title, String desc) {
+        Uri uri = Uri.parse(url);
+        DownloadManager.Request req = new DownloadManager.Request(uri);
+        req.setAllowedOverRoaming(true);
+        req.setShowRunningNotification(true);
+        req.setVisibleInDownloadsUi(true);
+        //下载中和下载完后都显示通知栏
+        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE | DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+        //使用系统默认的下载路径 此处为应用内 /android/data/packages ,所以兼容7.0
+        req.setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, title);
+        //通知栏标题
+        req.setTitle(title);
+        //通知栏描述信息
+        req.setDescription(desc);
+        //设置类型为.apk
+        req.setMimeType("application/vnd.android.package-archive");
+        //获取下载任务ID
+        DownloadManager dm = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
+        long id = dm.enqueue(req);
+        trackDownloadProgress(id, dm);
+//        if (context != null) {
+//            context.startActivity(new android.content.Intent(DownloadManager.ACTION_VIEW_DOWNLOADS));//启动系统下载界面
+//        }
+        return id;
+    }
+
+    private void installAPK(File desFile) {
+        setPermission(desFile.getAbsolutePath());
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        // 由于没有在Activity环境下启动Activity,设置下面的标签
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        //Android 7.0以上要使用FileProvider
+        if (Build.VERSION.SDK_INT >= 24) {
+            //参数1 上下文, 参数2 Provider主机地址 和配置文件中保持一致   参数3  共享的文件
+            Uri apkUri = FileProvider.getUriForFile(context, androidProviderAuthority, desFile);
+            //添加这一句表示对目标应用临时授权该Uri所代表的文件
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+        } else {
+            intent.setDataAndType(Uri.fromFile(desFile), "application/vnd.android.package-archive");
+        }
+        context.startActivity(intent);
+    }
+
+    //修改文件权限
+    private void setPermission(String absolutePath) {
+        String command = "chmod " + "777" + " " + absolutePath;
+        Runtime runtime = Runtime.getRuntime();
+        try {
+            runtime.exec(command);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
 }
